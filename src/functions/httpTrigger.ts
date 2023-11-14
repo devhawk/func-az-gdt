@@ -1,4 +1,4 @@
-import { app, HttpRequest, HttpResponseInit, input, InvocationContext } from "@azure/functions";
+import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { BlockBlobClient, ContainerClient, StorageSharedKeyCredential } from "@azure/storage-blob";
 import bs58 = require("bs58");
 import JSON5 = require("json5");
@@ -12,10 +12,10 @@ function calculateDeviceID(key: string | Uint8Array): bigint {
     return fnv1(key);
 }
 
-const fnvPrime = BigInt("1099511628211");
-const fnvOffset = BigInt("14695981039346656037");
-
 function fnv1(input: Uint8Array): bigint {
+    const fnvPrime = BigInt("1099511628211");
+    const fnvOffset = BigInt("14695981039346656037");
+
     let hash = fnvOffset;
     for (let i = 0; i < input.length; i++) {
         hash = BigInt.asUintN(64, hash * fnvPrime)
@@ -51,9 +51,10 @@ async function decrypt(key: Uint8Array, salt: Uint8Array, encryptedData: Uint8Ar
 }
 
 async function upload(client: ContainerClient, deviceKey: Uint8Array, data: BufferSource, type: 'attach' | 'prov', contentType: string): Promise<string> {
+    const deviceID = calculateDeviceID(deviceKey);
     const { salt, encryptedData } = await encrypt(deviceKey, data);
     const dataHash = toHex(await sha256(encryptedData));
-    const blobName = `${client.containerName}/${type}/${dataHash}`;
+    const blobName = `${client.containerName}/${deviceID}/${type}/${dataHash}`;
     await client.uploadBlockBlob(blobName, encryptedData.buffer, encryptedData.length, {
         metadata: {
             gdtcontenttype: contentType,
