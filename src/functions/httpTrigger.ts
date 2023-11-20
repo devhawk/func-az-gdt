@@ -89,11 +89,12 @@ async function decryptBlob(client: BlockBlobClient, deviceKey: Uint8Array) {
     }
 }
 
-// TODO: real credentials
-const cred = new StorageSharedKeyCredential(
-    "devstoreaccount1",
-    "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==");
-const containerClient = new ContainerClient(`http://127.0.0.1:10000/devstoreaccount1/gosqas`, cred);
+const accountName = process.env["AZURE_STORAGE_ACCOUNT_NAME"];
+const accountKey = process.env["AZURE_STORAGE_ACCOUNT_KEY"];
+const baseUrl = `https://${accountName}.blob.core.windows.net`
+
+const cred = new StorageSharedKeyCredential(accountName, accountKey);
+const containerClient = new ContainerClient(`${baseUrl}/gosqas`, cred);
 
 async function getProvenance(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
     context.log(`getProvenance ${request.params.deviceKey}`);
