@@ -3,6 +3,14 @@ import { BlockBlobClient, ContainerClient, StorageSharedKeyCredential } from "@a
 import bs58 = require("bs58");
 import JSON5 = require("json5");
 
+// To deploy this project from the command line, you need:
+//  * Azure CLI : https://learn.microsoft.com/en-us/cli/azure/
+//  * Azure Functions Core Tools: https://github.com/Azure/azure-functions-core-tools/blob/v4.x/README.md
+
+// Once you've logged into Azure via 'az login' to an Azure account w/ PubInv permissions,
+// you deploy this function project via this command:
+//  > func azure functionapp publish gosqasbe
+
 interface ProvenanceRecord {
     record: any,
     attachments?: readonly string[],
