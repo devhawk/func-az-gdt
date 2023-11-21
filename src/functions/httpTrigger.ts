@@ -3,25 +3,9 @@ import { BlockBlobClient, ContainerClient, StorageSharedKeyCredential } from "@a
 import bs58 = require("bs58");
 import JSON5 = require("json5");
 
-function encodeKey(key: Uint8Array): string { return bs58.encode(key); }
-function decodeKey(key: string): Uint8Array { return bs58.decode(key); }
-
-function calculateDeviceID(key: string | Uint8Array): bigint {
-    // if key is a string, convert it to a buffer 
-    key = typeof key === 'string' ? decodeKey(key) : key;
-    return fnv1(key);
-}
-
-function fnv1(input: Uint8Array): bigint {
-    const fnvPrime = BigInt("1099511628211");
-    const fnvOffset = BigInt("14695981039346656037");
-
-    let hash = fnvOffset;
-    for (let i = 0; i < input.length; i++) {
-        hash = BigInt.asUintN(64, hash * fnvPrime)
-        hash ^= BigInt(input[i])
-    }
-    return hash;
+interface ProvenanceRecord {
+    record: any,
+    attachments?: readonly string[],
 }
 
 async function sha256(data: BufferSource) {
@@ -37,6 +21,25 @@ function fromHex(hex: string): Uint8Array {
     return new Uint8Array(Buffer.from(hex, 'hex'));
 }
 
+function decodeKey(key: string): Uint8Array {
+    const $key = bs58.decode(key);
+    switch ($key.length) {
+        case 16:
+        case 24:
+        case 32:
+            return $key
+        default:
+            throw new Error(`Invalid Key Length ${$key.length}`);
+    }
+}
+
+async function calculateDeviceID(key: string | Uint8Array): Promise<string> {
+    // if key is a string, convert it to a buffer 
+    key = typeof key === 'string' ? decodeKey(key) : key;
+    const hash = await sha256(key);
+    return toHex(hash);
+}
+
 async function encrypt(key: Uint8Array, data: BufferSource): Promise<{ salt: Uint8Array; encryptedData: Uint8Array; }> {
     const $key = await crypto.subtle.importKey("raw", key.buffer, "AES-CBC", false, ['encrypt']);
     const salt = crypto.getRandomValues(new Uint8Array(16));
@@ -50,28 +53,33 @@ async function decrypt(key: Uint8Array, salt: Uint8Array, encryptedData: Uint8Ar
     return new Uint8Array(result);
 }
 
-async function upload(client: ContainerClient, deviceKey: Uint8Array, data: BufferSource, type: 'attach' | 'prov', contentType: string): Promise<string> {
-    const deviceID = calculateDeviceID(deviceKey);
+async function upload(client: ContainerClient, deviceKey: Uint8Array, data: BufferSource, type: 'attach' | 'prov', contentType: string, timestamp: number): Promise<string> {
+    const dataHash = toHex(await sha256(data));
+    const deviceID = await calculateDeviceID(deviceKey);
     const { salt, encryptedData } = await encrypt(deviceKey, data);
-    const dataHash = toHex(await sha256(encryptedData));
-    const blobName = `${client.containerName}/${deviceID}/${type}/${dataHash}`;
+    const blobID = toHex(await sha256(encryptedData));
+    const blobName = `${client.containerName}/${deviceID}/${type}/${blobID}`;
     await client.uploadBlockBlob(blobName, encryptedData.buffer, encryptedData.length, {
         metadata: {
             gdtcontenttype: contentType,
-            gdthash: toHex(await sha256(data)),
-            gdtsalt: toHex(salt)
+            gdthash: dataHash,
+            gdtsalt: toHex(salt),
+            gdttimestamp: `${timestamp}`,
         },
         blobHTTPHeaders: {
             blobContentType: "application/octet-stream"
         }
     });
-    return dataHash;
+    return blobID;
 }
 
 async function decryptBlob(client: BlockBlobClient, deviceKey: Uint8Array) {
     const props = await client.getProperties();
     const salt = props.metadata?.["gdtsalt"];
     if (!salt) throw new Error(`Missing Salt ${client.name}`);
+    const timestamp = parseInt(props.metadata?.["gdttimestamp"]);
+    if (isNaN(timestamp) || !isFinite(timestamp)) throw new Error(`Invalid Timestamp ${client.name}`);
+
     const buffer = await client.downloadToBuffer();
     const data = await decrypt(deviceKey, fromHex(salt), buffer);
     const hash = props.metadata?.["gdthash"];
@@ -81,7 +89,7 @@ async function decryptBlob(client: BlockBlobClient, deviceKey: Uint8Array) {
         }
     }
     const contentType = props.metadata?.["gdtcontenttype"];
-    return { data, contentType };
+    return { data, contentType, timestamp };
 
     function areEqual(first: Uint8Array, second: Uint8Array) {
         return first.length === second.length
@@ -89,9 +97,11 @@ async function decryptBlob(client: BlockBlobClient, deviceKey: Uint8Array) {
     }
 }
 
-const accountName = process.env["AZURE_STORAGE_ACCOUNT_NAME"];
-const accountKey = process.env["AZURE_STORAGE_ACCOUNT_KEY"];
-const baseUrl = `https://${accountName}.blob.core.windows.net`
+const accountName = process.env["AZURE_STORAGE_ACCOUNT_NAME"] ?? "devstoreaccount1";
+const accountKey = process.env["AZURE_STORAGE_ACCOUNT_KEY"] ?? "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
+const baseUrl = accountName === "devstoreaccount1"
+    ? `http://127.0.0.1:10000/devstoreaccount1`
+    : `https://${accountName}.blob.core.windows.net`;
 
 const cred = new StorageSharedKeyCredential(accountName, accountKey);
 const containerClient = new ContainerClient(`${baseUrl}/gosqas`, cred);
@@ -103,15 +113,17 @@ async function getProvenance(request: HttpRequest, context: InvocationContext): 
     if (!containerExists) { return { jsonBody: [] }; }
 
     const deviceKey = decodeKey(request.params.deviceKey);
-    const deviceID = calculateDeviceID(deviceKey);
+    const deviceID = await calculateDeviceID(deviceKey);
 
-    const records = new Array<any>();
+    const records = new Array<ProvenanceRecord & { timestamp: number }>();
     for await (const blob of containerClient.listBlobsFlat({ prefix: `gosqas/${deviceID}/prov/` })) {
         const blobClient = containerClient.getBlockBlobClient(blob.name);
-        const { data } = await decryptBlob(blobClient, deviceKey);
+        const { data, timestamp } = await decryptBlob(blobClient, deviceKey);
         const json = new TextDecoder().decode(data);
-        records.push(JSON.parse(json));
+        const provRecord = JSON.parse(json) as ProvenanceRecord;
+        records.push({ ...provRecord, timestamp });
     }
+    records.sort((a, b) => b.timestamp - a.timestamp)
     return { jsonBody: records };
 }
 
@@ -122,7 +134,7 @@ async function getAttachement(request: HttpRequest, context: InvocationContext):
     if (!containerExists) { return { status: 404 }; }
 
     const deviceKey = decodeKey(request.params.deviceKey);
-    const deviceID = calculateDeviceID(deviceKey);
+    const deviceID = await calculateDeviceID(deviceKey);
     const attachmentID = request.params.attachmentID;
 
     const blobClient = containerClient.getBlockBlobClient(`gosqas/${deviceID}/attach/${attachmentID}`);
@@ -150,19 +162,23 @@ async function postProvenance(request: HttpRequest, context: InvocationContext):
     if (typeof provenanceRecord !== 'string') { return { status: 404 }; }
     const record = JSON5.parse(provenanceRecord);
 
+    // https://stackoverflow.com/questions/9756120/how-do-i-get-a-utc-timestamp-in-javascript#comment73511758_9756120
+    const timestamp = new Date().getTime();
+
     const attachments = new Array<string>();
     {
         for (const attach of formData.getAll("attachment")) {
             if (typeof attach === 'string') continue;
             const data = await attach.arrayBuffer()
-            const attachmentID = await upload(containerClient, deviceKey, data, "attach", attach.type);
+            const attachmentID = await upload(containerClient, deviceKey, data, "attach", attach.type, timestamp);
             attachments.push(attachmentID);
         }
     }
 
     {
-        const data = new TextEncoder().encode(JSON.stringify({ record, attachments }));
-        const recordID = await upload(containerClient, deviceKey, data, "prov", "application/json");
+        const provRecord: ProvenanceRecord = { record, attachments };
+        const data = new TextEncoder().encode(JSON.stringify(provRecord));
+        const recordID = await upload(containerClient, deviceKey, data, "prov", "application/json", timestamp);
         return { jsonBody: { record: recordID, attachments } };
     }
 }
