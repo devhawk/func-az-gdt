@@ -11,7 +11,7 @@ async function getProvRecords(baseUrl: string, deviceKey: string) {
     const response = await fetch(`${baseUrl}/provenance/${deviceKey}`, {
         method: "GET",
     });
-    return await response.json() as { record: any, attachments?: string[] }[];
+    return await response.json() as { record: any, attachments?: string[], timestamp: number }[];
 }
 
 async function getAttachment(baseUrl: string, deviceKey: string, attachmentID: string) {
